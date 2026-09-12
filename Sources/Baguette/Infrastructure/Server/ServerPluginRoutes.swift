@@ -216,6 +216,50 @@ extension Server {
         case unknownDevice
     }
 
+    /// One in-flight gesture per simulator. Gestures hold `MainActor` for
+    /// their whole duration (`TypeText` ≈ 100 ms/char via `usleep`,
+    /// `Swipe` ≈ duration in step sleeps), so a second gesture arriving
+    /// mid-flight used to *queue* on the actor — hanging its HTTP route
+    /// and starving the stream for the first gesture's full duration.
+    /// Failing fast with an honest `busy` ack lets callers (crucible's
+    /// engine input → alloy fallback) handle it immediately instead.
+    /// Stream-config verbs (`force_idr`, `snapshot`) never dispatch
+    /// gestures and stay ungated.
+    enum InputDispatchGate {
+        /// Lock-guarded udid → busy map. A lock (not an actor) because
+        /// try/acquire sits on NIO event-loop threads where hopping is
+        /// unwelcome, and the critical section is a dictionary probe.
+        /// `nonisolated(unsafe)`: every access is serialized by `lock`.
+        private static let lock = NSLock()
+        nonisolated(unsafe) private static var busy: Set<String> = []
+
+        /// Non-blocking acquire. `true` = caller owns the gate and must
+        /// `release` exactly once (defer).
+        static func tryAcquire(udid: String) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            if busy.contains(udid) { return false }
+            busy.insert(udid)
+            return true
+        }
+
+        static func release(udid: String) {
+            lock.lock(); defer { lock.unlock() }
+            busy.remove(udid)
+        }
+
+        static func isBusy(_ udid: String) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            return busy.contains(udid)
+        }
+
+        static func resetForTesting() {
+            lock.lock(); defer { lock.unlock() }
+            busy.removeAll()
+        }
+    }
+
+    static let inputBusyAck = #"{"ok":false,"error":"device busy: a gesture is already in flight"}"#
+
     /// Dispatch one gesture envelope, the same JSON the stream socket
     /// and `baguette input` accept.
     ///
@@ -227,6 +271,8 @@ extension Server {
         udid: String, body: String, simulators: any Simulators
     ) async -> InputOutcome {
         guard let sim = simulators.find(udid: udid) else { return .unknownDevice }
+        guard InputDispatchGate.tryAcquire(udid: udid) else { return .ok(inputBusyAck) }
+        defer { InputDispatchGate.release(udid: udid) }
         let input = sim.input()
         let ack = await MainActor.run {
             GestureDispatcher(input: input).dispatch(line: body)
