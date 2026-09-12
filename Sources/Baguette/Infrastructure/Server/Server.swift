@@ -756,7 +756,7 @@ struct Server: Sendable {
             await Self.streamWS(
                 udid: Self.udidParam(context.request),
                 format: context.request.uri.queryParameters.get("format")
-                    .flatMap { StreamFormat(rawValue: $0) } ?? .mjpeg,
+                    .flatMap { StreamFormat(rawValue: $0) } ?? .avcc,
                 displayQuery: context.request.uri.queryParameters.get("display"),
                 simulators: simulators,
                 inbound: inbound,
