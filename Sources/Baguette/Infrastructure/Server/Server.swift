@@ -2609,7 +2609,7 @@ struct Server: Sendable {
                     try? await outbound.write(.text(frame))
                     continue
                 }
-                await handleInbound(line: line, stream: stream, dispatcher: dispatcher)
+                await handleInbound(line: line, stream: stream, dispatcher: dispatcher, udid: udid)
             }
         } catch {
             // socket closed; defer cleans up
@@ -2686,7 +2686,8 @@ struct Server: Sendable {
                 await handleInbound(
                     line: line,
                     stream: stream,
-                    dispatcher: dispatcher
+                    dispatcher: dispatcher,
+                    udid: udid
                 )
             }
         } catch {
@@ -3156,7 +3157,8 @@ struct Server: Sendable {
     private static func handleInbound(
         line: String,
         stream: any Stream,
-        dispatcher: GestureDispatcher
+        dispatcher: GestureDispatcher,
+        udid: String
     ) async {
         let next = ReconfigParser.apply(line, to: stream.config)
         if next != stream.config {
@@ -3172,6 +3174,15 @@ struct Server: Sendable {
             default: break
             }
         }
+        // Same per-simulator gate as the HTTP input route: a gesture
+        // sent mid-flight fails fast instead of queueing on MainActor
+        // behind the in-flight one (which would stall this socket's
+        // read loop and the stream with it). No ack write here — the
+        // dispatcher's ack channel is the HTTP route; the socket's
+        // gesture sends are fire-and-forget from the browser's side
+        // (its UX retry is the user's next event).
+        guard InputDispatchGate.tryAcquire(udid: udid) else { return }
+        defer { InputDispatchGate.release(udid: udid) }
         _ = await MainActor.run { dispatcher.dispatch(line: line) }
     }
 
