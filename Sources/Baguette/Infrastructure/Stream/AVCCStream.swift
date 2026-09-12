@@ -21,6 +21,12 @@ final class AVCCStream: Stream, @unchecked Sendable {
     private var screen: (any Screen)?
     private var lastSurface: IOSurface?
     private var pump: DispatchSourceTimer?
+    /// Change-gate for the idle pump: the pump exists to flush a stuck
+    /// decoder queue, not to re-encode an unchanged screen. Without this
+    /// gate the wire free-runs at 1/fps on a static screen — consumers
+    /// that treat "frames flowing" as "screen moving" (change-detection,
+    /// settle gates) never see quiet.
+    private var seedFilter = SeedFilter()
     private var pendingForceKeyframe = true
     /// Pre-armed at start so the first surface emits a JPEG seed; later
     /// flips back on via `requestSnapshot()`.
@@ -78,7 +84,10 @@ final class AVCCStream: Stream, @unchecked Sendable {
         // pipeline keeps flowing — without this, an idle simulator leaves
         // the last delta stuck in the consumer's `VideoDecoder` queue and
         // the canvas freezes on a stale frame.
-        guard let surface = lastSurface else { return }
+        // Seed-gated (like MJPEGStream): a flush is only useful when the
+        // surface actually changed; re-encoding an identical surface
+        // free-runs the wire at 1/fps and consumers never see quiet.
+        guard let surface = lastSurface, seedFilter.shouldEmit(surface) else { return }
         encode(surface)
     }
 
@@ -87,9 +96,15 @@ final class AVCCStream: Stream, @unchecked Sendable {
 
     private func handle(_ surface: IOSurface) {
         queue.async { [weak self] in
-            self?.lastSurface = surface
-            self?.encode(surface)
-            self?.armPump()
+            guard let self else { return }
+            self.lastSurface = surface
+            // SimulatorKit composites continuously while the screen hosts
+            // ANY animation (lock-screen clock, wallpaper parallax) even
+            // when the pixels are identical — gate on the IOSurface seed
+            // so the wire stays silent on a truly static screen.
+            guard self.seedFilter.shouldEmit(surface) else { return }
+            self.encode(surface)
+            self.armPump()
         }
     }
 
