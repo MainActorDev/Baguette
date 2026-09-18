@@ -147,7 +147,11 @@ static UIWindow *VTKeyWindow(void) {
 /// recursiveDescription prints for app-specific classes, derived the same
 /// way here so both sources agree on the vocabulary.
 static NSString *VTBaseClass(UIView *view) {
-    for (Class cls = class_getSuperclass(object_getClass(view));
+    // Start from `[view class]`, NOT object_getClass: KVO swaps the ISA to a
+    // dynamic NSKVONotifying_ subclass, and recursiveDescription prints the
+    // `-class` method's answer. Matching its vocabulary keeps both sources
+    // element-wise comparable.
+    for (Class cls = class_getSuperclass([view class]);
          cls != NULL;
          cls = class_getSuperclass(cls)) {
         NSString *name = NSStringFromClass(cls);
@@ -176,7 +180,7 @@ static NSDictionary *VTNode(UIView *view, NSInteger index, NSInteger parentIndex
     NSMutableDictionary *node = [NSMutableDictionary dictionary];
     node[@"index"] = @(index);
     if (parentIndex >= 0) node[@"parentIndex"] = @(parentIndex);
-    node[@"viewClass"] = NSStringFromClass(object_getClass(view));
+    node[@"viewClass"] = NSStringFromClass([view class]);
     NSString *base = VTBaseClass(view);
     if (base) node[@"baseClass"] = base;
     node[@"address"] = [NSString stringWithFormat:@"%p", view];
@@ -195,18 +199,30 @@ static NSDictionary *VTNode(UIView *view, NSInteger index, NSInteger parentIndex
 /// Walk `window.subviews` depth-first pre-order — the SAME order
 /// recursiveDescription prints, so node sequences compare element-wise
 /// between the two sources.
+///
+/// Iterative with an explicit stack, NOT a recursive block: a block that
+/// captures its own `__block` variable gets copied to the heap on first
+/// recursion, and the recursive invocation then calls through a stale
+/// self-reference — a SIGSEGV in `__VTWalk_block_invoke` (caught live on
+/// LP consumer-dev; crash report LionParcelLogistics-2026-09-18-160937).
 static NSArray *VTWalk(UIWindow *window) {
     NSMutableArray *nodes = [NSMutableArray array];
-    __block NSInteger idx = 0;
-    void (^recurse)(UIView *, NSInteger) = nil;
-    recurse = ^(UIView *view, NSInteger parentIndex) {
+    // Stack of (view, parentIndex) pairs, pushed right-to-left so pops
+    // visit children in order.
+    NSMutableArray *stack = [NSMutableArray array];
+    [stack addObject:@[window, @(-1)]];
+    NSInteger idx = 0;
+    while (stack.count > 0) {
+        NSArray *entry = stack.lastObject;
+        [stack removeLastObject];
+        UIView *view = entry[0];
+        NSInteger parentIndex = [entry[1] integerValue];
         NSInteger self_ = idx++;
         [nodes addObject:VTNode(view, self_, parentIndex)];
-        for (UIView *sub in view.subviews) {
-            recurse(sub, self_);
+        for (NSInteger i = view.subviews.count - 1; i >= 0; i--) {
+            [stack addObject:@[view.subviews[i], @(self_)]];
         }
-    };
-    recurse(window, -1);
+    }
     return nodes;
 }
 
