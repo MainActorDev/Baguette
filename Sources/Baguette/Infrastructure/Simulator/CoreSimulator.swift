@@ -145,6 +145,18 @@ final class CoreSimulator: Simulator, @unchecked Sendable {
         )
     }
 
+    /// Resolves the bundled `ViewTreeProbe.dylib` on the way through, since
+    /// an armed probe is useless without the dylib that answers. A build
+    /// that doesn't ship the dylib yields a handle whose `arm` throws
+    /// `ViewTreeError.dylibMissing` rather than silently doing nothing.
+    func viewTree() -> any ViewTree {
+        SharedFileViewTree(
+            requestURL: URL(fileURLWithPath: SharedFileViewTree.requestPath(forUDID: udid)),
+            dylibPath: InjectedDylibInstaller.installIfNeeded(.viewTreeProbe),
+            injection: SimctlSimulatorInjection()
+        )
+    }
+
     func pasteboard() -> any Pasteboard {
         SimctlPasteboard(udid: udid)
     }

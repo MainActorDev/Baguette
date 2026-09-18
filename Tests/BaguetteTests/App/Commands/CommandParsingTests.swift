@@ -20,11 +20,35 @@ struct CommandParsingTests {
             "tap", "double-tap", "swipe", "pinch", "pan", "press",
             "key", "type", "paste", "clipboard",
             "chrome", "screenshot", "record", "render-3d", "describe-ui", "logs", "serve",
-            "orientation", "shake", "status-bar", "location", "motion", "network",
+            "orientation", "shake", "status-bar", "location", "motion", "network", "viewtree",
             "install", "add-media",
             "openurl", "schemes",
             "plugin", "bakery", "diag-digitizer-trackpad", "lifetime", "interface",
         ])
+    }
+
+    // MARK: - viewtree
+
+    @Test func `viewtree arm parses udid and bundle`() throws {
+        let cmd = try ViewtreeCommand.Arm.parse([
+            "--udid", "U", "--bundle", "com.example.app"])
+        #expect(cmd.options.udid == "U")
+        #expect(cmd.bundleId == "com.example.app")
+        #expect(ViewtreeCommand.configuration.commandName == "viewtree")
+        #expect(ViewtreeCommand.Arm.configuration.commandName == "arm")
+    }
+
+    @Test func `viewtree arm rejects bundle ids without a dot`() {
+        #expect(throws: (any Error).self) {
+            try ViewtreeCommand.Arm.parse(["--udid", "U", "--bundle", "notabundle"])
+        }
+    }
+
+    @Test func `viewtree disarm and status parse`() throws {
+        #expect(ViewtreeCommand.Disarm.configuration.commandName == "disarm")
+        #expect(ViewtreeCommand.Status.configuration.commandName == "status")
+        _ = try ViewtreeCommand.Disarm.parse(["--udid", "U"])
+        _ = try ViewtreeCommand.Status.parse(["--udid", "U"])
     }
 
     // MARK: - openurl / schemes
