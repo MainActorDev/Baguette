@@ -74,6 +74,8 @@ static NSString *gAnsweredId;
 static os_unfair_lock gIdLock = OS_UNFAIR_LOCK_INIT;
 static BOOL gInstalled = NO;
 
+static void VTInstallWatcher(void);
+
 /// YES once the constructor decided this process is the probe target and
 /// installed the watcher. Exported on purpose: the house build script
 /// rejects a dylib that exports nothing (an all-static dylib is how the
@@ -86,12 +88,6 @@ BOOL VTProbeInstalled(void) {
 /// How often the request file is stat'ed. A dump is a rare, human-triggered
 /// event; 0.1s poll cost is the same cadence VirtualNetwork conditions on.
 static const double kPollInterval = 0.1;
-
-/// Monotonic clock for intervals — wall time can step backwards (NTP, the
-/// tester changing the simulator's date) and stall the poll.
-static double VTNow(void) {
-    return NSProcessInfo.processInfo.systemUptime;
-}
 
 /// Reads the current request, or nil when absent/unparseable.
 static NSDictionary *VTCurrentRequest(void) {
@@ -126,16 +122,152 @@ __attribute__((constructor)) static void ViewTreeProbeInit(void) {
     NSString *wanted = request[@"bundleId"];
     if (![wanted isKindOfClass:[NSString class]] || wanted.length == 0) return;
 
-    NSBundle *main = [NSBundle mainBundle];
-    NSString *bundleId = main.bundleIdentifier;
+    NSString *bundleId = NSBundle.mainBundle.bundleIdentifier;
     if (![bundleId isEqualToString:wanted]) return;
 
     VTLog(@"[ViewTreeProbe] installed in %@ — watching %@", bundleId, requestPath);
     gInstalled = YES;
-    // T2: install the stat-poll watcher here.
-    (void)kPollInterval;
-    (void)VTNow;
-    (void)VTResponsePath;
-    (void)gAnsweredId;
-    (void)gIdLock;
+    VTInstallWatcher();
+}
+
+#pragma mark - Dump
+
+/// keyWindow resolved the way that works headless on modern iOS: the KVC
+/// chain pinned by the lldb viewtree spike. Direct `keyWindow` is a
+/// deprecated-symbol compile error inside lldb's parser; the KVC form is
+/// the same call without the deprecation tripwire, and identical at runtime.
+static UIWindow *VTKeyWindow(void) {
+    id scene = [[UIApplication sharedApplication]
+        valueForKey:@"connectedScenes"];
+    scene = [scene anyObject];
+    return [scene valueForKey:@"keyWindow"];
+}
+
+/// First superclass whose name starts with `UI` — the "baseClass"
+/// recursiveDescription prints for app-specific classes, derived the same
+/// way here so both sources agree on the vocabulary.
+static NSString *VTBaseClass(UIView *view) {
+    for (Class cls = class_getSuperclass(object_getClass(view));
+         cls != NULL;
+         cls = class_getSuperclass(cls)) {
+        NSString *name = NSStringFromClass(cls);
+        if ([name hasPrefix:@"UI"]) return name;
+    }
+    return nil;
+}
+
+/// The text a view exposes to a human reading a tree — UILabel's text, a
+/// button's title. recursiveDescription prints `text = '…'` for exactly
+/// these; parity here keeps the two sources comparable.
+static NSString *VTLabel(UIView *view) {
+    if ([view isKindOfClass:[UILabel class]]) {
+        return ((UILabel *)view).text;
+    }
+    if ([view isKindOfClass:[UIButton class]]) {
+        return ((UIButton *)view).titleLabel.text;
+    }
+    return nil;
+}
+
+/// One node in the wire shape. `type` is deliberately absent — the host
+/// normalizes class→type through the ONE shared map the lldb parser uses,
+/// so the vocabulary can never drift between sources.
+static NSDictionary *VTNode(UIView *view, NSInteger index, NSInteger parentIndex) {
+    NSMutableDictionary *node = [NSMutableDictionary dictionary];
+    node[@"index"] = @(index);
+    if (parentIndex >= 0) node[@"parentIndex"] = @(parentIndex);
+    node[@"viewClass"] = NSStringFromClass(object_getClass(view));
+    NSString *base = VTBaseClass(view);
+    if (base) node[@"baseClass"] = base;
+    node[@"address"] = [NSString stringWithFormat:@"%p", view];
+    CGRect frame = view.frame;
+    node[@"rect"] = @{ @"x": @(frame.origin.x), @"y": @(frame.origin.y),
+                       @"width": @(frame.size.width), @"height": @(frame.size.height) };
+    if (view.hidden) node[@"hidden"] = @YES;
+    if (view.alpha < 0.01) node[@"alpha0"] = @YES;
+    if (view.clipsToBounds) node[@"clipped"] = @YES;
+    NSString *label = VTLabel(view);
+    if (label.length > 0) node[@"label"] = label;
+    node[@"hittable"] = @(view.userInteractionEnabled);
+    return node;
+}
+
+/// Walk `window.subviews` depth-first pre-order — the SAME order
+/// recursiveDescription prints, so node sequences compare element-wise
+/// between the two sources.
+static NSArray *VTWalk(UIWindow *window) {
+    NSMutableArray *nodes = [NSMutableArray array];
+    __block NSInteger idx = 0;
+    void (^recurse)(UIView *, NSInteger) = nil;
+    recurse = ^(UIView *view, NSInteger parentIndex) {
+        NSInteger self_ = idx++;
+        [nodes addObject:VTNode(view, self_, parentIndex)];
+        for (UIView *sub in view.subviews) {
+            recurse(sub, self_);
+        }
+    };
+    recurse(window, -1);
+    return nodes;
+}
+
+/// Answer `id` with a dump (or an honest error payload), atomically.
+static void VTRespond(NSString *id, NSString *bundleId, NSDictionary *extra) {
+    NSMutableDictionary *response = [NSMutableDictionary dictionary];
+    response[@"id"] = id;
+    response[@"bundleId"] = bundleId;
+    if (extra) [response addEntriesFromDictionary:extra];
+    NSData *json = [NSJSONSerialization dataWithJSONObject:response options:0 error:nil];
+    if (!json) {
+        VTLog(@"[ViewTreeProbe] response serialization failed — writing an honest error");
+        json = [NSJSONSerialization dataWithJSONObject:@{
+            @"id": id, @"bundleId": bundleId, @"error": @"serialize" } options:0 error:nil];
+        if (!json) return;
+    }
+    // Atomic, so a host polling concurrently never reads a half-written
+    // dump — it either sees the previous response or this one.
+    [json writeToFile:VTResponsePath() options:NSAtomicWrite error:nil];
+}
+
+/// The dump itself, on the main thread. Reads of UIKit state must happen
+/// there; the walk of ~300 views is single-digit milliseconds.
+static void VTPerformDump(NSString *id, NSString *bundleId) {
+    UIWindow *window = VTKeyWindow();
+    if (!window) {
+        // Honest empty-of-target: same class as the lldb path's NO_APP.
+        VTRespond(id, bundleId, @{ @"error": @"no-key-window" });
+        return;
+    }
+    NSArray *nodes = VTWalk(window);
+    VTRespond(id, bundleId, @{ @"nodes": nodes });
+    VTLog(@"[ViewTreeProbe] dump answered (%lu nodes)", (unsigned long)nodes.count);
+}
+
+#pragma mark - Watcher
+
+/// The stat-poll loop. Runs on a background queue; only the DUMP hops to
+/// main. Generation-guarded against mtime/size reuse by the host writing
+/// a new request with a fresh id — the id comparison is the contract.
+static void VTInstallWatcher(void) {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        for (;;) {
+            NSDictionary *request = VTCurrentRequest();
+            NSString *id = request[@"id"];
+            if ([id isKindOfClass:[NSString class]] && id.length > 0) {
+                NSString *answered;
+                os_unfair_lock_lock(&gIdLock);
+                answered = gAnsweredId;
+                os_unfair_lock_unlock(&gIdLock);
+                if (![id isEqualToString:answered]) {
+                    os_unfair_lock_lock(&gIdLock);
+                    gAnsweredId = [id copy];
+                    os_unfair_lock_unlock(&gIdLock);
+                    NSString *bundleId = [NSBundle mainBundle].bundleIdentifier;
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        VTPerformDump(id, bundleId);
+                    });
+                }
+            }
+            [NSThread sleepForTimeInterval:kPollInterval];
+        }
+    });
 }

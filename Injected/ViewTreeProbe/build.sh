@@ -25,6 +25,7 @@ build_slice() {
         -target "${arch}-apple-ios17.0-simulator" \
         -dynamiclib \
         -framework Foundation \
+        -framework UIKit \
         -fobjc-arc \
         -Wall \
         -install_name "@rpath/${OUT}" \
