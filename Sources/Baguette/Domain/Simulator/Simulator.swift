@@ -96,6 +96,13 @@ protocol Simulator: Sendable {
     /// the handle.
     func network() -> any Network
 
+    /// Serve this simulator's app view hierarchies on request, pause-free,
+    /// via the injected probe dylib. Like `motion()`/`network()` there is
+    /// no `simctl` verb behind this — the alternative (a debugger attach)
+    /// SIGSTOPs the app. Each call returns a fresh handle; the armed target
+    /// lives in the intent file, not the handle.
+    func viewTree() -> any ViewTree
+
     /// This simulator's shared pasteboard — set plain text, read it
     /// back, or sync the host Mac's full pasteboard across (images
     /// included). Each call returns a fresh handle; the underlying

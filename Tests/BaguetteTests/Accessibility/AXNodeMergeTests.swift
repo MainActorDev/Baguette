@@ -35,6 +35,24 @@ struct AXNodeMergeTests {
         #expect(!frames.contains(emptyTabBar.frame)) // childless container → must stay probeable
     }
 
+    // Regression (live LP home, iOS 27 sim): the walk emits OVERSIZED
+    // content leaves that swallow whole screen bands — a promo text
+    // (0 0; 402×294) covering the status bar and a blank text
+    // (0 810; 402×148) covering the tab bar. A "leaf" whose frame is a
+    // large fraction of the screen is a BAND OCCLUDER, not a discrete
+    // element; skipping its interior deletes the status bar and tab
+    // buttons from the merged tree.
+    @Test func `oversized leaves stay probeable - status bar and tab bands are not swallowed`() {
+        let promo = node("AXStaticText", label: "promo", x: 0, y: 0, w: 402, h: 294)
+        let blank = node("AXStaticText", label: " ", x: 0, y: 810, w: 402, h: 148)
+        let normal = node("AXStaticText", label: "hi", x: 20, y: 400, w: 80, h: 20)
+        let root = node("AXWindow", x: 0, y: 0, w: 402, h: 874, children: [promo, blank, normal])
+        let frames = root.contentLeafFrames()
+        #expect(frames.contains(normal.frame))  // discrete element → still skippable
+        #expect(!frames.contains(promo.frame))  // band occluder → keep probing inside
+        #expect(!frames.contains(blank.frame))
+    }
+
     // MARK: - grafting
 
     @Test func `merging grafts a discovery under the deepest container that contains it`() {

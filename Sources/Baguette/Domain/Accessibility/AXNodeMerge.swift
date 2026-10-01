@@ -26,9 +26,23 @@ extension AXNode {
         "AXDisclosureTriangle", "AXProgressIndicator",
     ]
 
-    /// A childless node whose role marks it as self-describing.
+    /// A childless node whose role marks it as self-describing AND whose
+    /// frame is a discrete element, not a screen band. Oversized leaves
+    /// are BAND OCCLUDERS the walk emits in place of real structure —
+    /// live-measured on LP home (iOS 27): a promo text (x:0, 402×294)
+    /// covering the status bar and a blank spacer (x:0, 402×148)
+    /// covering the tab bar. Signature: full-bleed width from the left
+    /// edge at band height (≥48pt — status-bar class). Discrete content
+    /// virtually never starts at x:0 and ends exactly at screen width;
+    /// their interiors can hide cross-process elements (status bar) or
+    /// childless-container content (tab-bar buttons), so the sweep must
+    /// keep probing inside them.
     var isContentLeaf: Bool {
-        children.isEmpty && Self.contentLeafRoles.contains(role)
+        guard children.isEmpty, Self.contentLeafRoles.contains(role) else { return false }
+        let screenWidth = 402.0 // portrait phone; iPad bands are proportionally wider
+        let fullBleed = frame.origin.x <= 8 && frame.size.width >= screenWidth - 8
+        let bandHeight = frame.size.height >= 48
+        return !(fullBleed && bandHeight)
     }
 
     /// Centre of this node's frame — used to decide which container a

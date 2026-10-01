@@ -30,6 +30,11 @@ struct InjectedDylib: Equatable, Sendable {
         name: "VirtualMotion", environmentOverride: "BAGUETTE_VIRTUALMOTION_DYLIB")
     static let network = InjectedDylib(
         name: "VirtualNetwork", environmentOverride: "BAGUETTE_VIRTUALNETWORK_DYLIB")
+    /// The view-tree probe — serves the app's own UIView hierarchy on
+    /// request so viewtree capture never needs a debugger attach (which
+    /// SIGSTOPs the app). Same arming, same install layout as the others.
+    static let viewTreeProbe = InjectedDylib(
+        name: "ViewTreeProbe", environmentOverride: "BAGUETTE_VIEWTREEPROBE_DYLIB")
 }
 
 /// Pure factory: turns a (dylib-bytes, support-dir, dylib) triple into the

@@ -59,6 +59,10 @@ let package = Package(
                 // URLSession traffic from the condition baguette publishes.
                 // Same build-and-stage path, same installer.
                 .copy("Resources/VirtualNetwork"),
+                // The view-tree probe — answers a dump request with the
+                // app's own UIView hierarchy (pause-free viewtree).
+                // Same build-and-stage path, same installer.
+                .copy("Resources/ViewTreeProbe"),
             ],
             swiftSettings: [
                 // MOCKING is debug-only; release strips mock code entirely.
